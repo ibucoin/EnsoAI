@@ -11,6 +11,7 @@ import {
   useState,
 } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { normalizePath } from '@/App/storage';
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -26,6 +27,7 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from '@/components/ui/empty';
+import { addToast } from '@/components/ui/toast';
 import { useDebouncedSave } from '@/hooks/useDebouncedSave';
 import { useI18n } from '@/i18n';
 import type { EditorTab, PendingCursor } from '@/stores/editor';
@@ -131,6 +133,47 @@ export const EditorArea = forwardRef<EditorAreaRef, EditorAreaProps>(function Ed
   const write = useTerminalWriteStore((state) => state.write);
   const focus = useTerminalWriteStore((state) => state.focus);
 
+  // Helper function to format line reference from selection
+  const formatLineRef = useCallback((selection: monaco.ISelection): string => {
+    const endLine =
+      selection.endColumn === 1 ? selection.endLineNumber - 1 : selection.endLineNumber;
+    return selection.startLineNumber === endLine
+      ? `L${selection.startLineNumber}`
+      : `L${selection.startLineNumber}-L${endLine}`;
+  }, []);
+
+  // Helper function to convert absolute path to relative path
+  const getRelativePath = useCallback(
+    (absolutePath: string): string => {
+      if (!rootPath) return absolutePath;
+      const normalizedRoot = normalizePath(rootPath);
+      const normalizedPath = normalizePath(absolutePath);
+      if (normalizedPath.startsWith(`${normalizedRoot}/`)) {
+        // Return original case path (not normalized) for display
+        return absolutePath.slice(rootPath.length + 1);
+      }
+      return absolutePath;
+    },
+    [rootPath]
+  );
+
+  // Send file path to current session (for tab context menu)
+  const handleSendToSession = useCallback(
+    (path: string) => {
+      if (!sessionId) return;
+      const displayPath = getRelativePath(path);
+      write(sessionId, `@${displayPath} `);
+      focus(sessionId);
+      addToast({
+        type: 'success',
+        title: t('Sent to session'),
+        description: `@${displayPath}`,
+        timeout: 2000,
+      });
+    },
+    [sessionId, getRelativePath, write, focus, t]
+  );
+
   // Markdown preview state
   const isMarkdown = isMarkdownFile(activeTabPath);
   const isImage = isImageFile(activeTabPath);
@@ -161,6 +204,7 @@ export const EditorArea = forwardRef<EditorAreaRef, EditorAreaProps>(function Ed
   const hasPendingAutoSaveRef = useRef(false);
   const blurDisposableRef = useRef<monaco.IDisposable | null>(null);
   const activeTabPathRef = useRef<string | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
   const pendingCursorRef = useRef<PendingCursor | null>(null);
   const editorForPathRef = useRef<string | null>(null);
   // Flag to suppress onChange events triggered by programmatic setValue calls (not user input)
@@ -215,6 +259,10 @@ export const EditorArea = forwardRef<EditorAreaRef, EditorAreaProps>(function Ed
   useEffect(() => {
     activeTabPathRef.current = activeTabPath;
   }, [activeTabPath]);
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId ?? null;
+  }, [sessionId]);
 
   // Sync ref immediately during render (not in useEffect) to ensure
   // it's available when Monaco's onMount callback fires
@@ -389,6 +437,45 @@ export const EditorArea = forwardRef<EditorAreaRef, EditorAreaProps>(function Ed
         onGlobalSearch?.(selectedText);
       });
 
+      // Add context menu action: Send to session
+      editor.addAction({
+        id: 'send-to-session',
+        label: t('Send to session'),
+        contextMenuGroupId: 'navigation',
+        contextMenuOrder: 1.5,
+        precondition: 'editorHasSelection',
+        run: (ed) => {
+          const selection = ed.getSelection();
+          const currentPath = activeTabPathRef.current;
+          if (!selection || selection.isEmpty() || !currentPath) return;
+
+          const currentSessionId = sessionIdRef.current;
+          if (!currentSessionId) return;
+
+          // Convert to relative path
+          const displayPath = getRelativePath(currentPath);
+
+          // Format line reference
+          const lineRef = formatLineRef(selection);
+
+          // Send to terminal with @ prefix and line reference
+          const message = `@${displayPath}#${lineRef} `;
+          const terminalWrite = useTerminalWriteStore.getState().write;
+          const terminalFocus = useTerminalWriteStore.getState().focus;
+
+          terminalWrite(currentSessionId, message);
+          terminalFocus(currentSessionId);
+
+          // Show success toast
+          addToast({
+            type: 'success',
+            title: t('Sent to session'),
+            description: `@${displayPath}#${lineRef}`,
+            timeout: 2000,
+          });
+        },
+      });
+
       // Restore view state if available
       if (activeTab?.viewState) {
         editor.restoreViewState(activeTab.viewState as monaco.editor.ICodeEditorViewState);
@@ -439,7 +526,16 @@ export const EditorArea = forwardRef<EditorAreaRef, EditorAreaProps>(function Ed
         });
       });
     },
-    [activeTab?.viewState, activeTabPath, onSave, onGlobalSearch, onClearPendingCursor]
+    [
+      activeTab?.viewState,
+      activeTabPath,
+      onSave,
+      onGlobalSearch,
+      onClearPendingCursor,
+      getRelativePath,
+      formatLineRef,
+      t,
+    ]
   );
 
   // Selection comment widget and cursor tracking
@@ -491,7 +587,8 @@ export const EditorArea = forwardRef<EditorAreaRef, EditorAreaProps>(function Ed
 
     const showCommentForm = () => {
       const selection = editor.getSelection();
-      if (!selection || selection.isEmpty() || !activeTabPath) return;
+      const currentPath = activeTabPathRef.current;
+      if (!selection || selection.isEmpty() || !currentPath) return;
 
       // Hide button widget
       if (selectionWidgetRef.current) {
@@ -500,10 +597,7 @@ export const EditorArea = forwardRef<EditorAreaRef, EditorAreaProps>(function Ed
       }
 
       // Convert to relative path
-      let displayPath = activeTabPath;
-      if (rootPath && activeTabPath.startsWith(rootPath)) {
-        displayPath = activeTabPath.slice(rootPath.length).replace(/^\//, '');
-      }
+      const displayPath = getRelativePath(currentPath);
 
       // Create comment widget
       const commentWidget: monaco.editor.IContentWidget = {
@@ -532,22 +626,22 @@ export const EditorArea = forwardRef<EditorAreaRef, EditorAreaProps>(function Ed
           endLineNumber={selection.endLineNumber}
           filePath={displayPath}
           onSubmit={(text) => {
+            const currentSessionId = sessionIdRef.current;
+            if (!currentSessionId) return;
+
             // Verify terminal writer exists
-            const writer = useTerminalWriteStore.getState().writers.get(sessionId);
+            const writer = useTerminalWriteStore.getState().writers.get(currentSessionId);
             if (!writer) {
-              console.warn('Terminal writer not found for session:', sessionId);
+              console.warn('Terminal writer not found for session:', currentSessionId);
               return;
             }
 
             // Format: path#L1-L10 or path#L5
-            const lineRef =
-              selection.startLineNumber === selection.endLineNumber
-                ? `L${selection.startLineNumber}`
-                : `L${selection.startLineNumber}-L${selection.endLineNumber}`;
+            const lineRef = formatLineRef(selection);
             const message = text
               ? `${displayPath}#${lineRef}\nUser comment: "${text}"`
               : `${displayPath}#${lineRef}`;
-            write(sessionId, `${message}\r`);
+            write(currentSessionId, `${message}\r`);
 
             // Close comment widget
             if (commentWidgetInstance) {
@@ -557,7 +651,7 @@ export const EditorArea = forwardRef<EditorAreaRef, EditorAreaProps>(function Ed
 
             // Focus terminal after short delay
             setTimeout(() => {
-              focus(sessionId);
+              focus(currentSessionId);
             }, 100);
           }}
           onCancel={() => {
@@ -702,7 +796,8 @@ export const EditorArea = forwardRef<EditorAreaRef, EditorAreaProps>(function Ed
     editorReady,
     sessionId,
     activeTabPath,
-    rootPath,
+    getRelativePath,
+    formatLineRef,
     t,
     setCurrentCursorLine,
     write,
@@ -913,6 +1008,8 @@ export const EditorArea = forwardRef<EditorAreaRef, EditorAreaProps>(function Ed
             onCloseLeft={onCloseLeft}
             onCloseRight={onCloseRight}
             onTabReorder={onTabReorder}
+            onSendToSession={sessionId ? handleSendToSession : undefined}
+            sessionId={sessionId}
           />
         </div>
         {/* Markdown Preview Toggle */}
