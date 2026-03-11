@@ -219,7 +219,8 @@ export function useEditorBlame({
 
     // Store refresh function in ref for external access
     refreshBlameRef.current = (): void => {
-      // Re-fetch blame after file save
+      // Clear cache and re-fetch blame (e.g., after file save)
+      stateRef.current.cache.delete(filePath);
       fetchAndShow();
     };
 

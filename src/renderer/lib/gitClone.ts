@@ -1,6 +1,23 @@
 import type { GitHostMapping, ParsedGitUrl } from '@shared/types';
 
 /**
+ * Get platform-specific path separator
+ */
+function getPathSep(): '/' | '\\' {
+  return typeof window !== 'undefined' && window.electronAPI?.env?.platform === 'win32'
+    ? '\\'
+    : '/';
+}
+
+/**
+ * Join path segments with platform-specific separator
+ */
+function joinPath(...segments: (string | undefined)[]): string {
+  const sep = getPathSep();
+  return segments.filter(Boolean).join(sep);
+}
+
+/**
  * Parse Git URL and extract components
  * Supports HTTPS and SSH formats
  */
@@ -115,14 +132,12 @@ export function generateClonePath(
     // Organized structure: baseDir/host/owner/repo
     const hostDir = findHostDirname(host, hostMappings);
     // Join all path segments (owner, subgroups, etc.) but exclude the repo name
-    const ownerPath = pathSegments.slice(0, -1).join('/');
-    targetDir = `${targetDir}/${hostDir}${ownerPath ? '/' + ownerPath : ''}`;
+    const ownerPath = pathSegments.slice(0, -1).join(getPathSep());
+    targetDir = joinPath(targetDir, hostDir, ownerPath);
   }
   // else: flat structure - clone directly to baseDir
 
-  const isWindows = typeof window !== 'undefined' && window.electronAPI?.env?.platform === 'win32';
-  const pathSep = isWindows ? '\\' : '/';
-  const fullPath = `${targetDir}${pathSep}${repo}`;
+  const fullPath = joinPath(targetDir, repo);
 
   return {
     targetDir,
@@ -137,9 +152,9 @@ export function generateClonePath(
 export function getDefaultBaseDir(): string {
   const homeDir = window.electronAPI?.env?.HOME || '';
   if (homeDir) {
-    return `${homeDir}/ensoai/repos`;
+    return joinPath(homeDir, 'ensoai', 'repos');
   }
-  return '~/ensoai/repos';
+  return joinPath('~', 'ensoai', 'repos');
 }
 
 /**
